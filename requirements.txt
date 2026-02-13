@@ -1,2 +1,2 @@
-requests
+fortnite-api
 python-dateutil

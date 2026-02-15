@@ -10,7 +10,6 @@ OUT_DIR = "docs/data"
 RARES_JSON = os.path.join(OUT_DIR, "rares.json")
 TOP_JSON = os.path.join(OUT_DIR, "rares_top.json")
 
-# Buckets you wanted (in days)
 BUCKETS = [
     ("365+", 365),
     ("180+", 180),
@@ -29,11 +28,7 @@ def bucket_for(days: int | None, never_in_shop: bool) -> str:
             return name
     return "0-6"
 
-def to_iso_date(dt) -> str:
-    """
-    shop_history entries can be datetimes or strings depending on wrapper versions.
-    We normalize to YYYY-MM-DD.
-    """
+def to_iso_date(dt) -> str | None:
     if dt is None:
         return None
     if isinstance(dt, str):
@@ -41,7 +36,6 @@ def to_iso_date(dt) -> str:
         if parsed.tzinfo is None:
             parsed = parsed.replace(tzinfo=timezone.utc)
         return parsed.date().isoformat()
-    # datetime-like
     try:
         if dt.tzinfo is None:
             dt = dt.replace(tzinfo=timezone.utc)
@@ -59,64 +53,57 @@ def days_since(iso_yyyy_mm_dd: str | None) -> int | None:
 def main() -> None:
     os.makedirs(OUT_DIR, exist_ok=True)
 
-    api_key = os.environ.get("FORTNITE_API_KEY")  # OK if blank for most endpoints
+    api_key = os.environ.get("FORTNITE_API_KEY")
     response_flags = fortnite_api.ResponseFlags.INCLUDE_SHOP_HISTORY
 
-    with fortnite_api.SyncClient(api_key=api_key, response_flags=response_flags) as client:
-
-    # Fetch all cosmetics
-    all_cosmetics = client.fetch_cosmetics_all()  # documented method name
-    br_items = all_cosmetics.br  # Battle Royale cosmetics
-
     enriched = []
-    for item in br_items:
-        # shop_history only appears when INCLUDE_SHOP_HISTORY flag is enabled
-        history = getattr(item, "shop_history", None) or []
 
-        # If empty history, it might genuinely never be in the shop
-        never_in_shop = (len(history) == 0)
+    # IMPORTANT: fortnite_api requires a session. The context manager sets it up.
+    with fortnite_api.SyncClient(api_key=api_key, response_flags=response_flags) as client:
+        all_cosmetics = client.fetch_cosmetics_all()
+        br_items = all_cosmetics.br
 
-        last_seen_iso = None
-        if history:
-            # Get max date in history
-            # Convert all to ISO YYYY-MM-DD, take the latest
-            iso_dates = [to_iso_date(x) for x in history]
-            iso_dates = [d for d in iso_dates if d]
-            last_seen_iso = max(iso_dates) if iso_dates else None
+        for item in br_items:
+            history = getattr(item, "shop_history", None) or []
+            never_in_shop = (len(history) == 0)
 
-        d_since = days_since(last_seen_iso)
-        bucket = bucket_for(d_since, never_in_shop)
+            last_seen_iso = None
+            if history:
+                iso_dates = [to_iso_date(x) for x in history]
+                iso_dates = [d for d in iso_dates if d]
+                last_seen_iso = max(iso_dates) if iso_dates else None
 
-        # Try to get an icon URL if present
-        icon = None
-        images = getattr(item, "images", None)
-        if images:
-            icon = getattr(images, "icon", None) or getattr(images, "small_icon", None)
+            d_since = days_since(last_seen_iso)
+            bkt = bucket_for(d_since, never_in_shop)
 
-        # Cosmetic type / rarity vary across versions; we handle safely
-        ctype = None
-        t = getattr(item, "type", None)
-        if t:
-            ctype = getattr(t, "value", None) or getattr(t, "display_value", None) or str(t)
+            icon = None
+            images = getattr(item, "images", None)
+            if images:
+                icon = getattr(images, "icon", None) or getattr(images, "small_icon", None)
 
-        rarity = None
-        r = getattr(item, "rarity", None)
-        if r:
-            rarity = getattr(r, "value", None) or getattr(r, "display_value", None) or str(r)
+            ctype = None
+            t = getattr(item, "type", None)
+            if t:
+                ctype = getattr(t, "value", None) or getattr(t, "display_value", None) or str(t)
 
-        enriched.append({
-            "id": getattr(item, "id", None),
-            "name": getattr(item, "name", None),
-            "type": ctype,
-            "rarity": rarity,
-            "icon": icon,
-            "last_seen": last_seen_iso,
-            "days_since_last_seen": d_since,
-            "bucket": bucket,
-            "never_in_shop": never_in_shop,
-        })
+            rarity = None
+            r = getattr(item, "rarity", None)
+            if r:
+                rarity = getattr(r, "value", None) or getattr(r, "display_value", None) or str(r)
 
-    # Sort: rarest first by days_since, but push "never in shop" and unknown to the bottom
+            enriched.append({
+                "id": getattr(item, "id", None),
+                "name": getattr(item, "name", None),
+                "type": ctype,
+                "rarity": rarity,
+                "icon": icon,
+                "last_seen": last_seen_iso,
+                "days_since_last_seen": d_since,
+                "bucket": bkt,
+                "never_in_shop": never_in_shop,
+            })
+
+    # Sort: rarest first by days_since; push never/unknown to bottom
     def sort_key(x):
         if x["never_in_shop"]:
             return (2, 0)
@@ -126,7 +113,6 @@ def main() -> None:
 
     enriched.sort(key=sort_key)
 
-    # Top list for homepage: only items that have actually been in the shop
     top = [x for x in enriched if (not x["never_in_shop"]) and (x["days_since_last_seen"] is not None)][:60]
 
     payload_all = {

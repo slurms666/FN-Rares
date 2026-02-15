@@ -11,7 +11,6 @@ OUT_DIR = "docs/data"
 RARES_JSON = os.path.join(OUT_DIR, "rares.json")
 TOP_JSON = os.path.join(OUT_DIR, "rares_top.json")
 
-# Buckets you wanted (in days)
 BUCKETS = [
     ("365+", 365),
     ("180+", 180),
@@ -22,20 +21,13 @@ BUCKETS = [
 
 
 def safe_str(x: Any) -> Optional[str]:
-    """
-    Convert fortnite_api enums/objects (and anything else) into a JSON-safe string.
-    Returns None for None.
-    """
+    """Convert enums/objects into a JSON-safe string (or None)."""
     if x is None:
         return None
-
-    # Some wrapper objects hold their useful value in one of these attributes.
     for attr in ("display_value", "value", "name"):
         v = getattr(x, attr, None)
         if isinstance(v, str) and v.strip():
             return v.strip()
-
-    # Sometimes the object itself stringifies nicely; if not, this still won't crash JSON.
     try:
         s = str(x).strip()
         return s if s else None
@@ -43,11 +35,34 @@ def safe_str(x: Any) -> Optional[str]:
         return None
 
 
+def safe_url(x: Any) -> Optional[str]:
+    """
+    Convert fortnite_api Asset / image objects into a URL string if possible.
+    - If x is already a string URL, return it
+    - If x has a 'url' attribute (common for Asset), return that
+    - Else try to stringify
+    """
+    if x is None:
+        return None
+
+    if isinstance(x, str):
+        return x
+
+    # Common pattern: Asset(url="https://...")
+    u = getattr(x, "url", None)
+    if isinstance(u, str) and u.strip():
+        return u.strip()
+
+    # Sometimes nested in 'value'
+    v = getattr(x, "value", None)
+    if isinstance(v, str) and v.strip():
+        return v.strip()
+
+    return safe_str(x)
+
+
 def to_iso_date(dt: Any) -> Optional[str]:
-    """
-    Normalize shop history entries to ISO YYYY-MM-DD strings.
-    Wrapper versions can return datetime objects or strings.
-    """
+    """Normalize shop history entries to ISO YYYY-MM-DD."""
     if dt is None:
         return None
 
@@ -57,7 +72,6 @@ def to_iso_date(dt: Any) -> Optional[str]:
             parsed = parsed.replace(tzinfo=timezone.utc)
         return parsed.date().isoformat()
 
-    # datetime-like objects
     try:
         if getattr(dt, "tzinfo", None) is None:
             dt = dt.replace(tzinfo=timezone.utc)
@@ -91,9 +105,8 @@ def main() -> None:
     api_key = os.environ.get("FORTNITE_API_KEY")
     response_flags = fortnite_api.ResponseFlags.INCLUDE_SHOP_HISTORY
 
-    enriched = []
+    items_out = []
 
-    # IMPORTANT: fortnite_api requires a session. The context manager sets it up.
     with fortnite_api.SyncClient(api_key=api_key, response_flags=response_flags) as client:
         all_cosmetics = client.fetch_cosmetics_all()
         br_items = all_cosmetics.br
@@ -111,29 +124,26 @@ def main() -> None:
             d_since = days_since(last_seen_iso)
             bkt = bucket_for(d_since, never_in_shop)
 
-            # Icon image (best-effort)
+            # Extract image URL safely (Asset -> url)
             icon = None
             images = getattr(item, "images", None)
             if images is not None:
-                icon = getattr(images, "icon", None) or getattr(images, "small_icon", None)
+                icon = safe_url(getattr(images, "icon", None)) or safe_url(getattr(images, "small_icon", None))
 
-            # Make these JSON-safe strings no matter what
-            ctype = safe_str(getattr(item, "type", None))
-            rarity = safe_str(getattr(item, "rarity", None))
-
-            enriched.append({
+            # JSON-safe strings for type/rarity/id/name
+            items_out.append({
                 "id": safe_str(getattr(item, "id", None)),
                 "name": safe_str(getattr(item, "name", None)),
-                "type": ctype,
-                "rarity": rarity,
-                "icon": icon,  # URL string already
-                "last_seen": last_seen_iso,  # YYYY-MM-DD
+                "type": safe_str(getattr(item, "type", None)),
+                "rarity": safe_str(getattr(item, "rarity", None)),
+                "icon": icon,
+                "last_seen": last_seen_iso,
                 "days_since_last_seen": d_since,
                 "bucket": bkt,
-                "never_in_shop": never_in_shop,
+                "never_in_shop": bool(never_in_shop),
             })
 
-    # Sort: rarest first by days_since; push never/unknown to bottom
+    # Sort: rarest first; push never/unknown to bottom
     def sort_key(x: dict) -> tuple:
         if x["never_in_shop"]:
             return (2, 0)
@@ -141,15 +151,14 @@ def main() -> None:
             return (1, 0)
         return (0, -int(x["days_since_last_seen"]))
 
-    enriched.sort(key=sort_key)
+    items_out.sort(key=sort_key)
 
-    # Homepage selection: only items that have actually been in the shop
-    top = [x for x in enriched if (not x["never_in_shop"]) and (x["days_since_last_seen"] is not None)][:60]
+    top = [x for x in items_out if (not x["never_in_shop"]) and (x["days_since_last_seen"] is not None)][:60]
 
     payload_all = {
         "updated_utc": datetime.now(timezone.utc).isoformat(),
-        "count": len(enriched),
-        "items": enriched
+        "count": len(items_out),
+        "items": items_out
     }
     payload_top = {
         "updated_utc": datetime.now(timezone.utc).isoformat(),

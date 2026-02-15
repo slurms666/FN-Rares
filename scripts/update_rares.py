@@ -62,7 +62,7 @@ def main() -> None:
     api_key = os.environ.get("FORTNITE_API_KEY")  # OK if blank for most endpoints
     response_flags = fortnite_api.ResponseFlags.INCLUDE_SHOP_HISTORY
 
-    client = fortnite_api.SyncClient(api_key=api_key, response_flags=response_flags)
+    with fortnite_api.SyncClient(api_key=api_key, response_flags=response_flags) as client:
 
     # Fetch all cosmetics
     all_cosmetics = client.fetch_cosmetics_all()  # documented method name
